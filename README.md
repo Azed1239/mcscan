@@ -221,4 +221,4 @@ overwhelming the servers found.
 
 ## License
 
-[MIT](LICENSE) © 2026 KylePine
+[MIT](LICENSE) © 2026 KylePine (Azed1239)
