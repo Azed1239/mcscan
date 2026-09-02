@@ -1,0 +1,23 @@
+# Scan results — real people's server IPs. Never commit these.
+servers.jsonl
+*.jsonl
+
+# PyInstaller build output
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
