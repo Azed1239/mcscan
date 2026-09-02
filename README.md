@@ -30,7 +30,7 @@ needs a package.
 ## Install & run
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/mcscan.git
+git clone https://github.com/Azed1239/mcscan.git
 cd mcscan
 ```
 
