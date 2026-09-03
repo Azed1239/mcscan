@@ -14,12 +14,14 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
+import webbrowser
 from types import SimpleNamespace
 
 import customtkinter as ctk
 
 from mcscan import (__version__, Scanner, requirements, version_family, version_tuple,
-                    version_matches, family_sort_key, loader_of,
+                    version_matches, family_sort_key, loader_of, parse_ports,
                     KNOWN_VERSIONS, ping_host, load_records, merge_records)
 
 # ------------------------------------------------------------------- appearance
@@ -65,6 +67,48 @@ def resource(name):
 
 def human(n):
     return format(int(n), ",")
+
+
+REPO = "Azed1239/mcscan"
+REPO_URL = "https://github.com/" + REPO
+
+DEFAULT_SETTINGS = {
+    "startup_count": 40,        # how many saved results to load on launch
+    "default_preset": "Gentle",
+    "default_ports": "25565",
+    "start_minimized": False,
+    # "theme" is intentionally left out for now — light mode is its own release.
+}
+
+
+class Settings:
+    """Tiny JSON-backed settings store. Unknown/missing keys fall back to the
+    defaults, so an old or hand-edited file can never crash the app."""
+
+    def __init__(self, path):
+        self.path = path
+        self.data = dict(DEFAULT_SETTINGS)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                saved = json.load(fh)
+            if isinstance(saved, dict):
+                self.data.update({k: saved[k] for k in DEFAULT_SETTINGS if k in saved})
+        except Exception:
+            pass
+
+    def get(self, key):
+        return self.data.get(key, DEFAULT_SETTINGS.get(key))
+
+    def set(self, key, value):
+        self.data[key] = value
+
+    def save(self):
+        try:
+            with open(self.path, "w", encoding="utf-8") as fh:
+                json.dump(self.data, fh, indent=2)
+            return True
+        except Exception:
+            return False
 
 
 # ----------------------------------------------------------------------- widgets
@@ -210,7 +254,9 @@ class App(ctk.CTk):
 
         self.out_path = os.path.join(app_dir(), "servers.jsonl")
         self.fav_path = os.path.join(app_dir(), "favorites.json")
+        self.settings = Settings(os.path.join(app_dir(), "settings.json"))
         self.favorites = self._load_favorites()
+        self.overlay = None
         self.queue = queue.Queue()
         self.scanner = None
         self.thread = None
@@ -233,6 +279,9 @@ class App(ctk.CTk):
         self._sync_rate_label()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Escape>", lambda _e: self._close_settings())
+        if self.settings.get("start_minimized"):
+            self.after(200, self.iconify)
         self.after(150, self._poll)
 
     # ------------------------------------------------------------------ layout
@@ -244,6 +293,13 @@ class App(ctk.CTk):
                      font=(UI, 22, "bold")).pack(side="left")
         ctk.CTkLabel(bar, text="  finds Minecraft servers on random public addresses",
                      text_color=MUTED, font=(UI, 12)).pack(side="left", pady=(4, 0))
+
+        self.settings_btn = ctk.CTkButton(bar, text="⚙  Settings", width=104, height=30,
+                                           corner_radius=10, fg_color=CARD,
+                                           hover_color=BORDER, text_color=TEXT,
+                                           font=(UI, 12, "bold"),
+                                           command=self._open_settings)
+        self.settings_btn.pack(side="right", padx=(12, 0))
 
         self.status_pill = ctk.CTkLabel(bar, text="  IDLE  ", text_color=MUTED,
                                         fg_color=CARD, corner_radius=10,
@@ -268,14 +324,14 @@ class App(ctk.CTk):
             unselected_color=BG, unselected_hover_color=BORDER,
             text_color=TEXT, font=(UI, 11, "bold"), command=self._apply_preset)
         self.preset.pack(fill="x", padx=16)
-        self.preset.set("Gentle")
+        self.preset.set(self.settings.get("default_preset"))
 
         heading("concurrency")
         self.conc = ctk.CTkSlider(side, from_=100, to=5000, number_of_steps=49,
                                   button_color=ACCENT, button_hover_color=ACCENT_HI,
                                   progress_color=ACCENT, fg_color=BG,
                                   command=self._on_slider)
-        self.conc.set(400)
+        self.conc.set(self.PRESETS.get(self.settings.get("default_preset"), (400, 2.0))[0])
         self.conc.pack(fill="x", padx=16)
         self.conc_value = ctk.CTkLabel(side, text="400 workers", text_color=MUTED,
                                        font=(UI, 11), anchor="w")
@@ -286,7 +342,7 @@ class App(ctk.CTk):
                                      button_color=ACCENT, button_hover_color=ACCENT_HI,
                                      progress_color=ACCENT, fg_color=BG,
                                      command=self._on_slider)
-        self.timeout.set(2.0)
+        self.timeout.set(self.PRESETS.get(self.settings.get("default_preset"), (400, 2.0))[1])
         self.timeout.pack(fill="x", padx=16)
         self.timeout_value = ctk.CTkLabel(side, text="2.0 s per probe", text_color=MUTED,
                                           font=(UI, 11), anchor="w")
@@ -303,7 +359,7 @@ class App(ctk.CTk):
         self.ports = ctk.CTkEntry(side, corner_radius=10, fg_color=BG,
                                   border_color=BORDER, text_color=TEXT,
                                   font=(MONO, 12), height=34)
-        self.ports.insert(0, "25565")
+        self.ports.insert(0, str(self.settings.get("default_ports")))
         self.ports.pack(fill="x", padx=16)
 
         self.legacy = ctk.CTkSwitch(side, text="Also catch pre-1.7 servers",
@@ -568,7 +624,6 @@ class App(ctk.CTk):
 
     def _start(self):
         try:
-            from mcscan import parse_ports
             ports = parse_ports(self.ports.get())
         except Exception:
             self.footer.configure(text="bad port list - try something like 25565",
@@ -696,9 +751,13 @@ class App(ctk.CTk):
         except Exception:
             return
         # Show the most recent 40, plus every favorite no matter how old it is.
-        recent = hits[-40:]
+        try:
+            count = max(0, int(self.settings.get("startup_count")))
+        except (TypeError, ValueError):
+            count = 40
+        recent = hits[-count:] if count else []
         shown = {self._key(h) for h in recent}
-        older_favs = [h for h in hits[:-40]
+        older_favs = [h for h in (hits[:-count] if count else hits)
                       if self._key(h) in self.favorites and self._key(h) not in shown]
         self._bulk = True
         for hit in older_favs + recent:
@@ -833,6 +892,13 @@ class App(ctk.CTk):
                     self._apply_refresh(*payload)
                 elif kind == "refresh_done":
                     self._finish_refresh()
+                elif kind == "update_result":
+                    self._apply_update_result(payload)
+                elif kind == "update_error":
+                    if self.overlay is not None:
+                        self.update_btn.configure(state="normal")
+                        self.update_status.configure(
+                            text="couldn't reach GitHub (offline?)", text_color=WARN)
                 elif kind == "error":
                     self.footer.configure(text="scan stopped: %s" % payload,
                                           text_color=DANGER)
@@ -857,6 +923,191 @@ class App(ctk.CTk):
             self.card_rate.set("0")
 
         self.after(200, self._poll)
+
+    # ----------------------------------------------------------------- settings
+
+    def _open_settings(self):
+        if self.overlay is not None:
+            return
+        # Scrim over the whole window. No real transparency in Tk, so a solid
+        # near-black frame stands in for a dim; blur/translucency is a later job.
+        self.overlay = ctk.CTkFrame(self, fg_color="#05070b", corner_radius=0)
+        self.overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.overlay.bind("<Button-1>", lambda _e: self._close_settings())
+
+        card = ctk.CTkFrame(self.overlay, fg_color=CARD, corner_radius=16,
+                            border_width=1, border_color=BORDER, width=560, height=560)
+        card.place(relx=0.5, rely=0.5, anchor="center")
+        card.pack_propagate(False)
+        card.bind("<Button-1>", lambda _e: "break")   # clicks inside must not close
+
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.pack(fill="x", padx=22, pady=(18, 6))
+        ctk.CTkLabel(head, text="Settings", text_color=TEXT,
+                     font=(UI, 18, "bold")).pack(side="left")
+        ctk.CTkButton(head, text="✕", width=32, height=30, corner_radius=9,
+                      fg_color=CARD_ALT, hover_color=BORDER, text_color=TEXT,
+                      font=(UI, 14, "bold"), command=self._close_settings).pack(side="right")
+
+        body = ctk.CTkScrollableFrame(card, fg_color="transparent",
+                                      scrollbar_button_color=BORDER,
+                                      scrollbar_button_hover_color=MUTED)
+        body.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+        self._build_about(body)
+        self._build_general(body)
+
+        self.footer_note = ctk.CTkLabel(card, text="", text_color=MUTED, font=(UI, 10))
+        self.footer_note.pack(pady=(0, 12))
+
+    def _close_settings(self):
+        if self.overlay is not None:
+            self.overlay.destroy()
+            self.overlay = None
+
+    def _section(self, parent, title):
+        ctk.CTkLabel(parent, text=title.upper(), text_color=MUTED,
+                     font=(UI, 10, "bold"), anchor="w").pack(fill="x", padx=8, pady=(14, 4))
+        frame = ctk.CTkFrame(parent, fg_color=CARD_ALT, corner_radius=12,
+                             border_width=1, border_color=BORDER)
+        frame.pack(fill="x", padx=6, pady=(0, 4))
+        return frame
+
+    @staticmethod
+    def _row(parent, label):
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=14, pady=8)
+        ctk.CTkLabel(row, text=label, text_color=TEXT, font=(UI, 12),
+                     anchor="w").pack(side="left")
+        return row
+
+    def _build_about(self, parent):
+        box = self._section(parent, "About")
+
+        row = self._row(box, "mcscan version")
+        ctk.CTkLabel(row, text="v" + __version__, text_color=ACCENT,
+                     font=(MONO, 12, "bold")).pack(side="right")
+
+        row = self._row(box, "GitHub")
+        ctk.CTkButton(row, text="Open repo  ↗", width=110, height=26, corner_radius=8,
+                      fg_color=CARD, hover_color=BORDER, text_color=TEXT, font=(UI, 11),
+                      command=lambda: webbrowser.open(REPO_URL)).pack(side="right")
+
+        row = self._row(box, "Credits")
+        ctk.CTkLabel(row, text="Azed1239", text_color=MUTED,
+                     font=(UI, 12)).pack(side="right")
+
+        row = self._row(box, "Updates")
+        self.update_btn = ctk.CTkButton(row, text="Check for updates", width=150, height=26,
+                                        corner_radius=8, fg_color=ACCENT_DK,
+                                        hover_color="#1c6b3a", text_color=ACCENT,
+                                        font=(UI, 11, "bold"), command=self._check_updates)
+        self.update_btn.pack(side="right")
+        self.update_status = ctk.CTkLabel(box, text="", text_color=MUTED, font=(UI, 11))
+        self.update_status.pack(fill="x", padx=14, pady=(0, 8))
+
+    def _build_general(self, parent):
+        box = self._section(parent, "General")
+
+        row = self._row(box, "Results loaded on startup")
+        self.set_startup = ctk.CTkEntry(row, width=80, height=28, corner_radius=8,
+                                        fg_color=BG, border_color=BORDER, text_color=TEXT,
+                                        font=(MONO, 12), justify="center")
+        self.set_startup.insert(0, str(self.settings.get("startup_count")))
+        self.set_startup.pack(side="right")
+
+        row = self._row(box, "Default speed preset")
+        self.set_preset = ctk.CTkOptionMenu(
+            row, values=list(self.PRESETS), width=130, height=28, corner_radius=8,
+            fg_color=BG, button_color=BG, button_hover_color=BORDER, text_color=TEXT,
+            font=(UI, 11), dropdown_fg_color=CARD_ALT, dropdown_text_color=TEXT,
+            dropdown_hover_color=BORDER)
+        self.set_preset.set(self.settings.get("default_preset"))
+        self.set_preset.pack(side="right")
+
+        row = self._row(box, "Default ports")
+        self.set_ports = ctk.CTkEntry(row, width=120, height=28, corner_radius=8,
+                                      fg_color=BG, border_color=BORDER, text_color=TEXT,
+                                      font=(MONO, 12))
+        self.set_ports.insert(0, str(self.settings.get("default_ports")))
+        self.set_ports.pack(side="right")
+
+        row = self._row(box, "Start minimized")
+        self.set_minimized = ctk.CTkSwitch(row, text="", width=44, progress_color=ACCENT,
+                                           button_color=TEXT)
+        if self.settings.get("start_minimized"):
+            self.set_minimized.select()
+        self.set_minimized.pack(side="right")
+
+        # Theme is deferred (light mode is its own release), shown so it's clearly planned.
+        row = self._row(box, "Theme")
+        ctk.CTkLabel(row, text="Dark  (light mode coming later)", text_color=MUTED,
+                     font=(UI, 11)).pack(side="right")
+
+        ctk.CTkButton(parent, text="Save", height=38, corner_radius=10, fg_color=ACCENT,
+                      hover_color=ACCENT_HI, text_color="#08130c", font=(UI, 13, "bold"),
+                      command=self._save_settings_panel).pack(fill="x", padx=6, pady=(14, 6))
+
+    def _save_settings_panel(self):
+        try:
+            startup = max(0, int(self.set_startup.get()))
+        except ValueError:
+            self.footer_note.configure(text="'Results loaded on startup' must be a number",
+                                       text_color=DANGER)
+            return
+        try:
+            parse_ports(self.set_ports.get())     # validate before saving
+        except Exception:
+            self.footer_note.configure(text="default ports look wrong - try 25565",
+                                       text_color=DANGER)
+            return
+
+        self.settings.set("startup_count", startup)
+        self.settings.set("default_preset", self.set_preset.get())
+        self.settings.set("default_ports", self.set_ports.get().strip() or "25565")
+        self.settings.set("start_minimized", bool(self.set_minimized.get()))
+        ok = self.settings.save()
+        self.footer_note.configure(
+            text="saved" if ok else "could not write settings.json",
+            text_color=ACCENT if ok else DANGER)
+        if ok:
+            self.after(700, self._close_settings)
+
+    # -------------------------------------------------------------- update check
+
+    def _check_updates(self):
+        self.update_btn.configure(state="disabled")
+        self.update_status.configure(text="checking...", text_color=MUTED)
+        threading.Thread(target=self._run_update_check, daemon=True).start()
+
+    def _run_update_check(self):
+        url = "https://api.github.com/repos/%s/releases/latest" % REPO
+        try:
+            req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
+                                                       "User-Agent": "mcscan"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.load(resp)
+            tag = str(data.get("tag_name", "")).lstrip("vV")
+            self.queue.put(("update_result", tag))
+        except Exception as exc:
+            self.queue.put(("update_error", str(exc)))
+
+    def _apply_update_result(self, tag):
+        if self.overlay is None:
+            return
+        self.update_btn.configure(state="normal")
+        latest = version_tuple(tag)
+        current = version_tuple(__version__)
+        if not latest:
+            self.update_status.configure(text="couldn't read the latest version",
+                                         text_color=WARN)
+        elif latest > current:
+            self.update_status.configure(text="v%s is available - click to open releases"
+                                         % tag, text_color=ACCENT)
+            self.update_btn.configure(text="Get v%s  ↗" % tag,
+                                      command=lambda: webbrowser.open(REPO_URL + "/releases"))
+        else:
+            self.update_status.configure(text="you're on the latest version (v%s)"
+                                         % __version__, text_color=MUTED)
 
     def _on_close(self):
         if self.scanner:

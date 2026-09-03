@@ -23,7 +23,7 @@ import sys
 import time
 from bisect import bisect_right
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # ---------------------------------------------------------------- address pool
 

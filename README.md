@@ -99,6 +99,20 @@ a loader.
 Filters only hide rows — scanning and saving are unaffected, so loosening a filter brings
 servers straight back without rescanning, and `servers.jsonl` always has everything.
 
+## Settings
+
+The **⚙ Settings** button (top right) opens a panel over the app with two sections:
+
+- **About** — the version you're on, a link to this repo, credits, and a **Check for
+  updates** button. That button only contacts GitHub when you click it (it asks the
+  releases API for the latest tag and points you at the download if there's a newer one),
+  so the app never phones home on its own.
+- **General** — how many saved results to load on startup, your default speed preset and
+  ports (so it stops resetting to Gentle / 25565 every launch), and start-minimized.
+
+Settings live in `settings.json` next to the program. Theme / light mode is planned but
+not in yet — the app is dark for now.
+
 ## Favorites and refresh
 
 **★ Star** any result to bookmark it. Favorites are kept in `favorites.json` next to the
