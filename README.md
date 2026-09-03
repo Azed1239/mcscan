@@ -99,6 +99,25 @@ a loader.
 Filters only hide rows — scanning and saving are unaffected, so loosening a filter brings
 servers straight back without rescanning, and `servers.jsonl` always has everything.
 
+## Favorites and refresh
+
+**★ Star** any result to bookmark it. Favorites are kept in `favorites.json` next to the
+program — deliberately *not* in `servers.jsonl`, so rewriting the results can never lose
+your bookmarks. Starred servers are always loaded on startup even if they're older than
+the 40 most recent results, and the **★ favorites** filter narrows the list to just them.
+
+**Refresh** re-pings every loaded server to bring player counts up to date. Rows update
+live as replies arrive, servers that no longer answer are greyed out and marked
+**offline**, and the results are merged back into `servers.jsonl` — matched on ip+port,
+preserving `found_at` and any records that weren't part of the refresh.
+
+Refresh is disabled while a scan is running, on purpose: the scanner holds
+`servers.jsonl` open in append mode, and rewriting the file underneath it would send its
+later writes to an orphaned file.
+
+An offline server is kept, not deleted — it's flagged `"offline": true` so you can see it
+went away, and a later refresh clears the flag if it comes back.
+
 ## Command line
 
 ```bash

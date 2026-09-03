@@ -23,7 +23,7 @@ import sys
 import time
 from bisect import bisect_right
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # ---------------------------------------------------------------- address pool
 
@@ -701,6 +701,49 @@ async def ping_host(host, port, timeout, protocol):
             await writer.wait_closed()
         except Exception:
             pass
+
+
+def load_records(path):
+    """Every record in a results file, skipping anything unparseable."""
+    if not os.path.exists(path):
+        return []
+    records = []
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            if line.strip():
+                try:
+                    records.append(json.loads(line))
+                except ValueError:
+                    pass
+    return records
+
+
+def write_records(path, records):
+    """Rewrite a results file atomically, so an interrupted write can't shred it."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        for record in records:
+            fh.write(json.dumps(record) + "\n")
+    os.replace(tmp, path)
+
+
+def merge_records(path, updates):
+    """Fold updated records into the results file.
+
+    Matched on ip+port and written back in the file's existing order, so
+    refreshing a handful of servers never drops the ones it didn't touch.
+    """
+    records = load_records(path)
+    index = {(r.get("ip"), r.get("port")): i for i, r in enumerate(records)}
+    for update in updates:
+        key = (update.get("ip"), update.get("port"))
+        if key in index:
+            records[index[key]] = update
+        else:
+            index[key] = len(records)
+            records.append(update)
+    write_records(path, records)
+    return len(records)
 
 
 async def recheck_file(args):

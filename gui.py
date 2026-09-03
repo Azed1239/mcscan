@@ -20,7 +20,7 @@ import customtkinter as ctk
 
 from mcscan import (__version__, Scanner, requirements, version_family, version_tuple,
                     version_matches, family_sort_key, loader_of,
-                    KNOWN_VERSIONS)
+                    KNOWN_VERSIONS, ping_host, load_records, merge_records)
 
 # ------------------------------------------------------------------- appearance
 
@@ -36,6 +36,7 @@ ACCENT_DK = "#14532d"
 DANGER    = "#f47067"
 DANGER_HI = "#d95a51"
 WARN      = "#f0b429"
+STAR      = "#f2c744"
 
 ANY_VERSION = "Any version"
 ANY_LOADER  = "Any loader"
@@ -87,58 +88,102 @@ class StatCard(ctk.CTkFrame):
 class ResultRow(ctk.CTkFrame):
     """One found server."""
 
-    def __init__(self, master, hit, on_copy):
+    def __init__(self, master, hit, on_copy, on_favorite, favorite=False):
         super().__init__(master, corner_radius=12, fg_color=CARD_ALT,
                          border_width=1, border_color=BORDER)
         self.hit = hit
         self.on_copy = on_copy
+        self.on_favorite = on_favorite
+        self.favorite = favorite
         self.grid_columnconfigure(0, weight=1)
         # Fixed widths so the columns line up down the whole list.
         self.grid_columnconfigure(1, minsize=104)
         self.grid_columnconfigure(2, minsize=124)
         self.grid_columnconfigure(3, minsize=60)
 
-        addr = "%s:%d" % (hit["ip"], hit["port"])
         left = ctk.CTkFrame(self, fg_color="transparent")
         left.grid(row=0, column=0, sticky="ew", padx=(14, 8), pady=10)
-        ctk.CTkLabel(left, text=addr, text_color=TEXT, font=(MONO, 14, "bold"),
-                     anchor="w").pack(fill="x")
-        motd = hit.get("motd") or "(no message of the day)"
-        ctk.CTkLabel(left, text=motd[:78], text_color=MUTED, font=(UI, 11),
-                     anchor="w").pack(fill="x", pady=(2, 0))
-
-        need, level = requirements(hit)
-        colour = {"need": WARN, "maybe": TEXT, "ok": ACCENT,
-                  "unknown": MUTED}.get(level, MUTED)
-        prefix = {"need": "!  ", "maybe": "~  ", "ok": "+  ",
-                  "unknown": "?  "}.get(level, "")
-        ctk.CTkLabel(left, text=prefix + need, text_color=colour, font=(UI, 11, "bold"),
-                     anchor="w").pack(fill="x", pady=(3, 0))
+        self.addr_label = ctk.CTkLabel(left, text="", text_color=TEXT,
+                                       font=(MONO, 14, "bold"), anchor="w")
+        self.addr_label.pack(fill="x")
+        self.motd_label = ctk.CTkLabel(left, text="", text_color=MUTED, font=(UI, 11),
+                                       anchor="w")
+        self.motd_label.pack(fill="x", pady=(2, 0))
+        self.need_label = ctk.CTkLabel(left, text="", font=(UI, 11, "bold"), anchor="w")
+        self.need_label.pack(fill="x", pady=(3, 0))
 
         mid = ctk.CTkFrame(self, fg_color="transparent")
         mid.grid(row=0, column=1, padx=6)
-        online, mx = hit.get("online"), hit.get("max")
-        players = "%s / %s" % (online if online is not None else "?",
-                               mx if mx is not None else "?")
-        colour = ACCENT if isinstance(online, int) and online > 0 else MUTED
-        ctk.CTkLabel(mid, text=players, text_color=colour,
-                     font=(UI, 14, "bold")).pack()
-        ctk.CTkLabel(mid, text="PLAYERS", text_color=MUTED, font=(UI, 9, "bold")).pack()
+        self.players_label = ctk.CTkLabel(mid, text="", font=(UI, 14, "bold"))
+        self.players_label.pack()
+        self.players_caption = ctk.CTkLabel(mid, text="PLAYERS", text_color=MUTED,
+                                            font=(UI, 9, "bold"))
+        self.players_caption.pack()
 
-        ver = ctk.CTkLabel(self, text=" %s " % str(hit.get("version", "?"))[:20],
-                           text_color=ACCENT, fg_color=ACCENT_DK, corner_radius=8,
-                           font=(UI, 11, "bold"), height=24)
-        ver.grid(row=0, column=2, padx=6)
+        self.ver_label = ctk.CTkLabel(self, text="", text_color=ACCENT,
+                                      fg_color=ACCENT_DK, corner_radius=8,
+                                      font=(UI, 11, "bold"), height=24)
+        self.ver_label.grid(row=0, column=2, padx=6)
 
-        lat = hit.get("latency_ms")
-        ctk.CTkLabel(self, text=("%dms" % lat) if lat else "-", text_color=MUTED,
-                     font=(UI, 11), width=52).grid(row=0, column=3, padx=(0, 4))
+        self.lat_label = ctk.CTkLabel(self, text="", text_color=MUTED,
+                                      font=(UI, 11), width=52)
+        self.lat_label.grid(row=0, column=3, padx=(0, 4))
+
+        self.star_btn = ctk.CTkButton(self, text="", width=36, height=28,
+                                      corner_radius=9, fg_color=CARD,
+                                      hover_color=BORDER, font=(UI, 15),
+                                      command=self._toggle_favorite)
+        self.star_btn.grid(row=0, column=4, padx=(0, 6))
 
         self.copy_btn = ctk.CTkButton(self, text="Copy", width=62, height=28,
                                       corner_radius=9, fg_color=CARD, hover_color=BORDER,
                                       text_color=TEXT, font=(UI, 11, "bold"),
                                       command=self._copy)
-        self.copy_btn.grid(row=0, column=4, padx=(0, 12))
+        self.copy_btn.grid(row=0, column=5, padx=(0, 12))
+
+        self.render()
+
+    def render(self):
+        """Paint every field from self.hit. Called on build and after a refresh."""
+        hit = self.hit
+        offline = bool(hit.get("offline"))
+
+        self.addr_label.configure(text="%s:%d" % (hit["ip"], hit["port"]),
+                                  text_color=MUTED if offline else TEXT)
+        motd = hit.get("motd") or "(no message of the day)"
+        self.motd_label.configure(text=motd[:78])
+
+        need, level = requirements(hit)
+        self.need_label.configure(
+            text={"need": "!  ", "maybe": "~  ", "ok": "+  ",
+                  "unknown": "?  "}.get(level, "") + need,
+            text_color={"need": WARN, "maybe": TEXT, "ok": ACCENT,
+                        "unknown": MUTED}.get(level, MUTED))
+
+        if offline:
+            self.players_label.configure(text="offline", text_color=DANGER)
+            self.players_caption.configure(text="NO ANSWER")
+        else:
+            online, mx = hit.get("online"), hit.get("max")
+            self.players_label.configure(
+                text="%s / %s" % (online if online is not None else "?",
+                                  mx if mx is not None else "?"),
+                text_color=ACCENT if isinstance(online, int) and online > 0 else MUTED)
+            self.players_caption.configure(text="PLAYERS")
+
+        self.ver_label.configure(text=" %s " % str(hit.get("version", "?"))[:20])
+        lat = hit.get("latency_ms")
+        self.lat_label.configure(text=("%dms" % lat) if lat and not offline else "-")
+        self.star_btn.configure(text="★" if self.favorite else "☆",
+                                text_color=STAR if self.favorite else MUTED)
+
+    def update_hit(self, hit):
+        self.hit = hit
+        self.render()
+
+    def _toggle_favorite(self):
+        self.favorite = self.on_favorite(self.hit)
+        self.render()
 
     def _copy(self):
         self.on_copy("%s:%d" % (self.hit["ip"], self.hit["port"]))
@@ -164,9 +209,14 @@ class App(ctk.CTk):
             pass
 
         self.out_path = os.path.join(app_dir(), "servers.jsonl")
+        self.fav_path = os.path.join(app_dir(), "favorites.json")
+        self.favorites = self._load_favorites()
         self.queue = queue.Queue()
         self.scanner = None
         self.thread = None
+        self.refresh_thread = None
+        self.refreshed = []
+        self.refresh_total = 0
         self.rows = []
         self.seen_versions = set()
         self._bulk = False
@@ -306,6 +356,11 @@ class App(ctk.CTk):
         ctk.CTkButton(head, text="Open folder", width=100, height=28, corner_radius=9,
                       fg_color=CARD_ALT, hover_color=BORDER, text_color=TEXT,
                       font=(UI, 11), command=self._open_folder).pack(side="right")
+        self.refresh_btn = ctk.CTkButton(head, text="Refresh", width=90, height=28,
+                                         corner_radius=9, fg_color=CARD_ALT,
+                                         hover_color=BORDER, text_color=TEXT,
+                                         font=(UI, 11), command=self._refresh)
+        self.refresh_btn.pack(side="right", padx=(0, 8))
         self.elapsed_label = ctk.CTkLabel(head, text="", text_color=MUTED, font=(UI, 11))
         self.elapsed_label.pack(side="right", padx=12)
 
@@ -335,7 +390,7 @@ class App(ctk.CTk):
         bar.grid(row=1, column=0, sticky="ew", padx=16, pady=(4, 10))
 
         ctk.CTkLabel(bar, text="FILTER", text_color=MUTED,
-                     font=(UI, 10, "bold")).pack(side="left", padx=(14, 10), pady=10)
+                     font=(UI, 10, "bold")).pack(side="left", padx=(12, 8), pady=10)
 
         def menu(values, command, width=150):
             widget = ctk.CTkOptionMenu(
@@ -349,7 +404,7 @@ class App(ctk.CTk):
 
         # Editable: pick an exact version from the list, or just type one.
         self.version_menu = ctk.CTkComboBox(
-            bar, values=[ANY_VERSION], width=168, height=30, corner_radius=9,
+            bar, values=[ANY_VERSION], width=148, height=30, corner_radius=9,
             fg_color=CARD_ALT, border_color=BORDER, button_color=CARD_ALT,
             button_hover_color=BORDER, text_color=TEXT, font=(UI, 11),
             dropdown_fg_color=CARD_ALT, dropdown_text_color=TEXT,
@@ -361,13 +416,20 @@ class App(ctk.CTk):
             self.version_menu.bind(event, lambda _e: self._apply_filters())
         self._refresh_versions()
 
-        self.loader_menu = menu(LOADER_CHOICES, lambda _v: self._apply_filters(), 190)
+        self.loader_menu = menu(LOADER_CHOICES, lambda _v: self._apply_filters(), 168)
 
         self.players_switch = ctk.CTkSwitch(
-            bar, text="has players online", text_color=TEXT, font=(UI, 11),
+            bar, text="has players", text_color=TEXT, font=(UI, 11),
             progress_color=ACCENT, button_color=TEXT,
             command=self._apply_filters)
         self.players_switch.pack(side="left", padx=(6, 10))
+
+        self.fav_switch = ctk.CTkSwitch(
+            bar, text="★ favorites (0)", text_color=TEXT, font=(UI, 11),
+            progress_color=STAR, button_color=TEXT,
+            command=self._apply_filters)
+        self.fav_switch.pack(side="left", padx=(0, 10))
+        self._sync_fav_label()
 
         self.reset_btn = ctk.CTkButton(bar, text="Reset", width=64, height=28,
                                        corner_radius=9, fg_color=CARD_ALT,
@@ -427,8 +489,10 @@ class App(ctk.CTk):
 
         if self.players_switch.get():
             online = hit.get("online")
-            if not isinstance(online, int) or online < 1:
+            if not isinstance(online, int) or online < 1 or hit.get("offline"):
                 return False
+        if self.fav_switch.get() and self._key(hit) not in self.favorites:
+            return False
         return True
 
     def _apply_filters(self):
@@ -530,6 +594,7 @@ class App(ctk.CTk):
                                  hover_color=DANGER_HI, text_color="#1a0a08")
         self.status_pill.configure(text="  SCANNING  ", text_color="#08130c",
                                    fg_color=ACCENT)
+        self.refresh_btn.configure(state="disabled")
         self._set_controls("disabled")
 
     def _run(self):
@@ -551,6 +616,7 @@ class App(ctk.CTk):
                                  hover_color=ACCENT_HI, text_color="#08130c",
                                  state="normal")
         self.status_pill.configure(text="  IDLE  ", text_color=MUTED, fg_color=CARD)
+        self.refresh_btn.configure(state="normal")
         self._set_controls("normal")
 
     def _set_controls(self, state):
@@ -564,7 +630,9 @@ class App(ctk.CTk):
 
     def _add_row(self, hit, at_top=True):
         self._note_version(hit)
-        row = ResultRow(self.results, hit, self._copy)
+        row = ResultRow(self.results, hit, self._copy,
+                        self._toggle_favorite,
+                        self._key(hit) in self.favorites)
         if at_top:
             self.rows.insert(0, row)
         else:
@@ -580,16 +648,60 @@ class App(ctk.CTk):
         self.clipboard_append(text)
 
 
+    # --------------------------------------------------------------- favorites
+
+    @staticmethod
+    def _key(hit):
+        return "%s:%s" % (hit.get("ip"), hit.get("port"))
+
+    def _load_favorites(self):
+        """Kept in their own file so rewriting servers.jsonl can never lose them."""
+        try:
+            with open(self.fav_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return set(data if isinstance(data, list) else data.get("favorites", []))
+        except Exception:
+            return set()
+
+    def _save_favorites(self):
+        try:
+            with open(self.fav_path, "w", encoding="utf-8") as fh:
+                json.dump(sorted(self.favorites), fh, indent=2)
+        except Exception as exc:
+            self.footer.configure(text="could not save favorites: %s" % exc,
+                                  text_color=DANGER)
+
+    def _toggle_favorite(self, hit):
+        """Returns the new starred state for the row that asked."""
+        key = self._key(hit)
+        starred = key not in self.favorites
+        if starred:
+            self.favorites.add(key)
+        else:
+            self.favorites.discard(key)
+        self._save_favorites()
+        self._sync_fav_label()
+        if self.fav_switch.get():        # list is filtered to favorites: restack it
+            self._apply_filters()
+        return starred
+
+    def _sync_fav_label(self):
+        self.fav_switch.configure(text="★ favorites (%d)" % len(self.favorites))
+
     def _load_previous(self):
         if not os.path.exists(self.out_path):
             return
         try:
-            with open(self.out_path, "r", encoding="utf-8") as fh:
-                hits = [json.loads(line) for line in fh if line.strip()]
+            hits = load_records(self.out_path)
         except Exception:
             return
+        # Show the most recent 40, plus every favorite no matter how old it is.
+        recent = hits[-40:]
+        shown = {self._key(h) for h in recent}
+        older_favs = [h for h in hits[:-40]
+                      if self._key(h) in self.favorites and self._key(h) not in shown]
         self._bulk = True
-        for hit in hits[-40:]:
+        for hit in older_favs + recent:
             try:
                 self._add_row(hit, at_top=True)
             except Exception:
@@ -602,6 +714,90 @@ class App(ctk.CTk):
             self.footer.configure(
                 text="%s server%s already saved in  %s" % (
                     human(len(hits)), "" if len(hits) == 1 else "s", self.out_path))
+
+    # ----------------------------------------------------------------- refresh
+
+    def _refresh(self):
+        """Re-ping every loaded server to update player counts and status.
+
+        Blocked during a scan on purpose: the Scanner holds servers.jsonl open in
+        append mode, and rewriting the file underneath it would send its later
+        writes to an orphaned file.
+        """
+        if self.thread and self.thread.is_alive():
+            self.footer.configure(
+                text="stop the scan first - refreshing rewrites the results file",
+                text_color=WARN)
+            return
+        if self.refresh_thread and self.refresh_thread.is_alive():
+            return
+        hits = [row.hit for row in self.rows]
+        if not hits:
+            self.footer.configure(text="nothing to refresh yet", text_color=MUTED)
+            return
+
+        self.refreshed = []
+        self.refresh_total = len(hits)
+        self.refresh_btn.configure(text="0/%d" % self.refresh_total, state="disabled")
+        self.footer.configure(text="re-pinging %d servers..." % self.refresh_total,
+                              text_color=MUTED)
+        self.refresh_thread = threading.Thread(target=self._run_refresh, args=(hits,),
+                                               daemon=True)
+        self.refresh_thread.start()
+
+    def _run_refresh(self, hits):
+        async def go():
+            gate = asyncio.Semaphore(24)     # gentle: these are known live hosts
+
+            async def one(old):
+                async with gate:
+                    fresh = await ping_host(old["ip"], old["port"], 3.0, 767)
+                    self.queue.put(("refreshed", (old, fresh)))
+
+            await asyncio.gather(*[one(hit) for hit in hits])
+
+        try:
+            asyncio.run(go())
+        except Exception as exc:
+            self.queue.put(("error", "refresh failed: %s" % exc))
+        finally:
+            self.queue.put(("refresh_done", None))
+
+    def _apply_refresh(self, old, fresh):
+        key = self._key(old)
+        if fresh is None:
+            merged = dict(old)
+            merged["offline"] = True
+        else:
+            merged = dict(fresh)
+            merged["found_at"] = old.get("found_at", merged.get("found_at"))
+            merged.pop("offline", None)
+        self.refreshed.append(merged)
+        for row in self.rows:
+            if self._key(row.hit) == key:
+                row.update_hit(merged)
+                break
+        self.refresh_btn.configure(text="%d/%d" % (len(self.refreshed),
+                                                   self.refresh_total))
+
+    def _finish_refresh(self):
+        self.refresh_btn.configure(text="Refresh", state="normal")
+        if not self.refreshed:
+            return
+        gone = sum(1 for r in self.refreshed if r.get("offline"))
+        players = sum(r.get("online") or 0 for r in self.refreshed
+                      if not r.get("offline"))
+        try:
+            merge_records(self.out_path, self.refreshed)
+            saved = ""
+        except Exception as exc:
+            saved = " (could not save: %s)" % exc
+        self.footer.configure(
+            text="refreshed %d - %d offline, %d players online right now%s" % (
+                len(self.refreshed), gone, players, saved),
+            text_color=DANGER if saved else MUTED)
+        self._refresh_versions()
+        self._apply_filters()
 
     def _open_folder(self):
         """Reveal the results folder in the OS file manager (Win/Mac/Linux)."""
@@ -633,6 +829,10 @@ class App(ctk.CTk):
                 kind, payload = item
                 if kind == "done":
                     self._finish()
+                elif kind == "refreshed":
+                    self._apply_refresh(*payload)
+                elif kind == "refresh_done":
+                    self._finish_refresh()
                 elif kind == "error":
                     self.footer.configure(text="scan stopped: %s" % payload,
                                           text_color=DANGER)

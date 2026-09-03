@@ -2,6 +2,9 @@
 servers.jsonl
 *.jsonl
 
+# Local bookmarks — per-machine, not part of the project
+favorites.json
+
 # PyInstaller build output
 build/
 dist/
